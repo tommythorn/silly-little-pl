@@ -2,8 +2,14 @@
 
 type Source<'a> = &'a [u8];
 type Compiled = isize;
-enum Insn {Add, Sub, Mul, Negate, Const(isize),}
-
+#[allow(dead_code)]
+enum Insn {
+    Add,
+    Sub,
+    Mul,
+    Negate,
+    Const(isize),
+}
 
 #[test]
 fn number1() {
@@ -44,25 +50,26 @@ fn main() {
 }
 
 fn run(s: Source) -> Result<Compiled, String> {
-    let mut _code : Vec<Insn> = vec![];
+    let mut _code: Vec<Insn> = vec![];
     parse(s)
     //execute(code)
 }
 
+#[allow(dead_code)]
 fn execute(code: Vec<Insn>) -> Result<isize, String> {
     let mut stack = vec![];
     let mut tos = 0;
     for insn in code {
-	match insn {
-	    Insn::Add => tos += stack.pop().ok_or("Run: stack empty")?,
-	    Insn::Sub => tos -= stack.pop().ok_or("Run: stack empty")?,
-	    Insn::Mul => tos *= stack.pop().ok_or("Run: stack empty")?,
-	    Insn::Negate => tos = -tos,
-	    Insn::Const(k) => {
-		stack.push(tos);
-		tos = k;
-	    }
-	}
+        match insn {
+            Insn::Add => tos += stack.pop().ok_or("Run: stack empty")?,
+            Insn::Sub => tos -= stack.pop().ok_or("Run: stack empty")?,
+            Insn::Mul => tos *= stack.pop().ok_or("Run: stack empty")?,
+            Insn::Negate => tos = -tos,
+            Insn::Const(k) => {
+                stack.push(tos);
+                tos = k;
+            }
+        }
     }
     Ok(tos)
 }
@@ -70,7 +77,7 @@ fn execute(code: Vec<Insn>) -> Result<isize, String> {
 #[test]
 fn execute_test() {
     use Insn::*;
-    assert_eq!(execute(vec![Const(42),Const(42),Add]), Ok(84));
+    assert_eq!(execute(vec![Const(42), Const(42), Add]), Ok(84));
 }
 
 fn parse(mut s: Source) -> Result<Compiled, String> {
