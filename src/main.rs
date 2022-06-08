@@ -15,66 +15,69 @@ pub enum Insn {
     Block(Code),
     Restart(usize),
     Exit(usize),
+    ExitIfTrue(usize),
+    ExitIfFalse(usize),
     SkipNextIfFalse,
 }
 
 #[test]
 fn number1() {
-    assert_eq!(run(b"-42"), Ok(-42));
+    assert_eq!(run_expr(b"-42"), Ok(-42));
 }
 #[test]
 fn number2() {
-    assert_eq!(run(b" - 42"), Ok(-42));
+    assert_eq!(run_expr(b" - 42"), Ok(-42));
 }
 #[test]
 fn number3() {
-    assert_eq!(run(b" 84 - 42"), Ok(42));
+    assert_eq!(run_expr(b" 84 - 42"), Ok(42));
 }
 #[test]
 fn number4() {
-    assert_eq!(run(b" 84 + -42"), Ok(42));
+    assert_eq!(run_expr(b" 84 + -42"), Ok(42));
 }
 #[test]
 fn number5() {
-    assert_eq!(run(b"(2)"), Ok(2));
+    assert_eq!(run_expr(b"(2)"), Ok(2));
 }
 #[test]
 fn number6() {
-    assert!(run(b"(2 + )").is_err());
+    assert!(run_expr(b"(2 + )").is_err());
 }
 #[test]
 fn number7() {
-    assert!(run(b" ( 2 ").is_err());
+    assert!(run_expr(b" ( 2 ").is_err());
+}
+
+#[test]
+fn if_stmt() -> Result<(), String> {
+    run(b"if 1 then print 42")?;
+    run(b"if 0 then print 666")?;
+    Ok(())
 }
 
 fn main() {
-    let mut range = 1..5;
-
-    'from_beginning: loop {
-        for x in range {
-            println!("{x}");
-            if x == 3 {
-                println!("changing gear");
-                range = 10..15;
-                continue 'from_beginning;
-            }
-        }
-        break;
-    }
-
-    if false {
-        for s in std::env::args().skip(1) {
-            match run(s.as_bytes()) {
-                Ok(v) => println!("Result: {v}"),
-                Err(s) => println!("Error: {s}"),
-            }
+    for s in std::env::args().skip(1) {
+        match run(s.as_bytes()) {
+            Ok(v) => println!("Result: {v}"),
+            Err(s) => println!("Error: {s}"),
         }
     }
 }
 
-fn run(s: Source) -> Result<isize, String> {
+fn run(mut s: Source) -> Result<isize, String> {
+    skip_whitespace(&mut s);
     let mut code: Code = vec![];
     parse(s, &mut code)?;
+    let mut vm = VM::new();
+    vm.execute(&code)?;
+    Ok(vm.tos)
+}
+
+pub fn run_expr(mut s: Source) -> Result<isize, String> {
+    skip_whitespace(&mut s);
+    let mut code: Code = vec![];
+    parse_expr(&mut s, &mut code)?;
     let mut vm = VM::new();
     vm.execute(&code)?;
     Ok(vm.tos)
@@ -139,10 +142,12 @@ impl VM {
                         pc += 1;
                     }
                 }
+                Restart(0) => pc = 0,
                 Restart(n) => {
-                    suspended.drain(suspended.len() - n..);
+                    // XXX This seems wrong?
+                    suspended.drain(suspended.len() - n - 1..);
                     println!("  Suspended: {suspended:?}");
-                    (code, _) = *suspended.last().ok_or("Illegal Restart({n})")?;
+                    (code, _) = suspended.pop().ok_or("Illegal Restart({n})")?;
                     pc = 0;
                 }
                 Exit(n) => {
@@ -152,6 +157,26 @@ impl VM {
                     }
                     println!("  Suspended: {suspended:?}");
                     (code, pc) = suspended.pop().ok_or("Illegal Exit({n})")?;
+                }
+                ExitIfFalse(n) => {
+                    if self.pop()? == 0 {
+                        suspended.drain(suspended.len() - n..);
+                        if suspended.is_empty() {
+                            return Ok(());
+                        }
+                        println!("  Suspended: {suspended:?}");
+                        (code, pc) = suspended.pop().ok_or("Illegal ExitIfFalse({n})")?;
+                    }
+                }
+                ExitIfTrue(n) => {
+                    if self.pop()? != 0 {
+                        suspended.drain(suspended.len() - n..);
+                        if suspended.is_empty() {
+                            return Ok(());
+                        }
+                        println!("  Suspended: {suspended:?}");
+                        (code, pc) = suspended.pop().ok_or("Illegal ExitIfTrue({n})")?;
+                    }
                 }
             }
         }
@@ -193,17 +218,32 @@ fn execute_nested() {
 }
 
 fn parse(mut s: Source, code: &mut Code) -> Result<(), String> {
-    skip_whitespace(&mut s);
-    let r = parse_expr(&mut s, code);
-    if r.is_ok() {
-        if s.is_empty() {
-            r
-        } else {
-            Err(format!("Junk at end: {}", std::str::from_utf8(s).unwrap()))
-        }
+    let r = parse_stmt(&mut s, code);
+
+    if r.is_ok() && !s.is_empty() {
+        Err(format!("Junk at end: {}", std::str::from_utf8(s).unwrap()))
     } else {
         r
     }
+}
+
+fn parse_stmt(s: &mut Source, code: &mut Code) -> Result<(), String> {
+    if token_match(s, b"print") {
+        parse_expr(s, code)?;
+        code.push(Insn::Print);
+    } else if token_match(s, b"if") {
+        // if test then body
+        // block { [[test]] exit-if-false(0) [[body]] }
+        let mut block = vec![];
+        parse_expr(s, &mut block)?;
+        block.push(Insn::ExitIfFalse(0));
+        if !token_match(s, b"then") {
+            return Err("Missing then".to_string());
+        }
+        parse_stmt(s, &mut block)?;
+        code.push(Insn::Block(block));
+    }
+    Ok(())
 }
 
 fn parse_expr(s: &mut Source, code: &mut Code) -> Result<(), String> {
@@ -270,6 +310,8 @@ fn parse_uint(s: &mut Source, code: &mut Code) -> Result<(), String> {
     }
 }
 
+// XXX This is very terrible; we need to tokenize the input and
+// maintain the lookahead token.
 fn token_match<'a>(s: &mut Source<'a>, expected: &[u8]) -> bool {
     if s.len() >= expected.len() && s[0..expected.len()] == *expected {
         *s = &s[expected.len()..];
