@@ -3,6 +3,7 @@
 type Source<'a> = &'a [u8];
 type Compiled = isize;
 #[allow(dead_code)]
+#[derive(Debug)]
 pub enum Insn {
     Const(isize),
     Dup,
@@ -12,8 +13,9 @@ pub enum Insn {
     Negate,
     Print,
     Block(Vec<Insn>),
-    RestartBlock(usize),
-    ExitBlock(usize),
+    Restart(usize),
+    Exit(usize),
+    SkipNextIfFalse,
 }
 
 #[test]
@@ -46,10 +48,26 @@ fn number7() {
 }
 
 fn main() {
-    for s in std::env::args().skip(1) {
-        match run(s.as_bytes()) {
-            Ok(v) => println!("Result: {v}"),
-            Err(s) => println!("Error: {s}"),
+    let mut range = 1..5;
+
+    'from_beginning: loop {
+        for x in range {
+            println!("{x}");
+            if x == 3 {
+                println!("changing gear");
+                range = 10..15;
+                continue 'from_beginning;
+            }
+        }
+        break;
+    }
+
+    if false {
+        for s in std::env::args().skip(1) {
+            match run(s.as_bytes()) {
+                Ok(v) => println!("Result: {v}"),
+                Err(s) => println!("Error: {s}"),
+            }
         }
     }
 }
@@ -64,13 +82,6 @@ fn run(s: Source) -> Result<Compiled, String> {
 pub struct VM {
     stack: Vec<isize>,
     tos: isize,
-}
-
-#[derive(PartialEq, Eq, Debug)]
-pub enum Continuation {
-    Done,
-    Exit(usize),
-    Restart(usize),
 }
 
 impl Default for VM {
@@ -93,56 +104,55 @@ impl VM {
         Ok(res)
     }
 
-    pub fn execute(&mut self, code: &[Insn]) -> Result<Continuation, String> {
-        'from_beginning: loop {
-            for insn in code {
-                use Continuation::*;
-                use Insn::*;
-                match insn {
-                    Dup => self.stack.push(self.tos),
-                    Add => self.tos += self.stack.pop().ok_or("Run: stack empty")?,
-                    Sub => self.tos -= self.stack.pop().ok_or("Run: stack empty")?,
-                    Mul => self.tos *= self.stack.pop().ok_or("Run: stack empty")?,
-                    Negate => self.tos = -self.tos,
-                    Const(k) => {
-                        self.stack.push(self.tos);
-                        self.tos = *k;
-                    }
-                    Print => {
-                        println!("{}", self.pop()?);
-                    }
-                    Block(inner) => match self.execute(inner)? {
-                        Done => {}
-                        Restart(0) => continue 'from_beginning,
-                        Restart(n) => return Ok(Restart(n - 1)),
-                        Exit(0) => break,
-                        Exit(n) => return Ok(Exit(n - 1)),
-                    },
-                    RestartBlock(0) => {
-                        if self.pop()? != 0 {
-                            continue 'from_beginning;
-                        }
-                    }
-                    RestartBlock(n) => {
-                        if self.pop()? != 0 {
-                            return Ok(Restart(*n));
-                        }
-                    }
-                    ExitBlock(0) => {
-                        if self.pop()? != 0 {
-                            break;
-                        }
-                    }
-                    ExitBlock(n) => {
-                        if self.pop()? != 0 {
-                            return Ok(Exit(*n));
-                        }
+    pub fn execute(&mut self, mut code: &[Insn]) -> Result<(), String> {
+        let mut suspended = vec![];
+        let mut pc = 0;
+
+        loop {
+            let insn = if pc < code.len() { &code[pc] } else { &Exit(0) };
+            pc += 1;
+            use Insn::*;
+            println!("Execute {insn:?} (tos {})", self.tos);
+            match insn {
+                Dup => self.stack.push(self.tos),
+                Add => self.tos += self.stack.pop().ok_or("Run: stack empty")?,
+                Sub => self.tos -= self.stack.pop().ok_or("Run: stack empty")?,
+                Mul => self.tos *= self.stack.pop().ok_or("Run: stack empty")?,
+                Negate => self.tos = -self.tos,
+                Const(k) => {
+                    self.stack.push(self.tos);
+                    self.tos = *k;
+                }
+                Print => {
+                    println!("{}", self.pop()?);
+                }
+                Block(inner) => {
+                    suspended.push((code, pc));
+                    println!("  Suspended: {suspended:?}");
+                    code = inner;
+                    pc = 0;
+                }
+                SkipNextIfFalse => {
+                    if self.pop()? == 0 {
+                        pc += 1;
                     }
                 }
+                Restart(n) => {
+                    suspended.drain(suspended.len() - n..);
+                    println!("  Suspended: {suspended:?}");
+                    (code, _) = *suspended.last().ok_or("Illegal Restart({n})")?;
+                    pc = 0;
+                }
+                Exit(n) => {
+                    suspended.drain(suspended.len() - n..);
+                    if suspended.is_empty() {
+                        return Ok(());
+                    }
+                    println!("  Suspended: {suspended:?}");
+                    (code, pc) = suspended.pop().ok_or("Illegal Exit({n})")?;
+                }
             }
-            break;
         }
-        Ok(Continuation::Done)
     }
 }
 
@@ -152,18 +162,19 @@ fn execute_test() {
     let mut vm = VM::new();
     assert_eq!(
         vm.execute(&vec![Block(vec![
-            Const(42),
+            Const(43),
             Const(42),
             Add,
             Print,
             Const(84),
             Const(1),
-            ExitBlock(0),
+            SkipNextIfFalse,
+            Exit(0),
             Const(666),
             Print,
             Const(666),
         ])]),
-        Ok(Continuation::Done)
+        Ok(())
     );
     assert_eq!(vm.tos, 84);
 }
@@ -172,10 +183,10 @@ fn execute_test() {
 fn execute_nested() {
     use Insn::*;
     let mut vm = VM::new();
-    let blk2 = Block(vec![Const(42), Const(1), ExitBlock(1)]);
+    let blk2 = Block(vec![Const(42), Const(1), SkipNextIfFalse, Exit(1)]);
     let blk1 = Block(vec![blk2, Const(666)]);
 
-    assert_eq!(vm.execute(&vec![blk1]), Ok(Continuation::Done));
+    assert_eq!(vm.execute(&vec![blk1]), Ok(()));
     assert_eq!(vm.tos, 42);
 }
 
