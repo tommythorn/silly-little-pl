@@ -1,8 +1,8 @@
-// So, you want to write a parser (without pulling in a crate)?
+// So, you want to write a compiler (without pulling in a crate)?
 
 type Source<'a> = &'a [u8];
-type Compiled = isize;
 #[allow(dead_code)]
+pub type Code = Vec<Insn>;
 #[derive(Debug)]
 pub enum Insn {
     Const(isize),
@@ -12,7 +12,7 @@ pub enum Insn {
     Mul,
     Negate,
     Print,
-    Block(Vec<Insn>),
+    Block(Code),
     Restart(usize),
     Exit(usize),
     SkipNextIfFalse,
@@ -72,10 +72,12 @@ fn main() {
     }
 }
 
-fn run(s: Source) -> Result<Compiled, String> {
-    let mut _code: Vec<Insn> = vec![];
-    parse(s)
-    //execute(code)
+fn run(s: Source) -> Result<isize, String> {
+    let mut code: Code = vec![];
+    parse(s, &mut code)?;
+    let mut vm = VM::new();
+    vm.execute(&code)?;
+    Ok(vm.tos)
 }
 
 #[allow(dead_code)]
@@ -111,12 +113,12 @@ impl VM {
         loop {
             let insn = if pc < code.len() { &code[pc] } else { &Exit(0) };
             pc += 1;
-            use Insn::*;
             println!("Execute {insn:?} (tos {})", self.tos);
+            use Insn::*;
             match insn {
                 Dup => self.stack.push(self.tos),
                 Add => self.tos += self.stack.pop().ok_or("Run: stack empty")?,
-                Sub => self.tos -= self.stack.pop().ok_or("Run: stack empty")?,
+                Sub => self.tos = self.stack.pop().ok_or("Run: stack empty")? - self.tos,
                 Mul => self.tos *= self.stack.pop().ok_or("Run: stack empty")?,
                 Negate => self.tos = -self.tos,
                 Const(k) => {
@@ -190,9 +192,9 @@ fn execute_nested() {
     assert_eq!(vm.tos, 42);
 }
 
-fn parse(mut s: Source) -> Result<Compiled, String> {
+fn parse(mut s: Source, code: &mut Code) -> Result<(), String> {
     skip_whitespace(&mut s);
-    let r = parse_expr(&mut s);
+    let r = parse_expr(&mut s, code);
     if r.is_ok() {
         if s.is_empty() {
             r
@@ -204,34 +206,37 @@ fn parse(mut s: Source) -> Result<Compiled, String> {
     }
 }
 
-fn parse_expr(s: &mut Source) -> Result<Compiled, String> {
-    let mut v = parse_term(s)?;
+fn parse_expr(s: &mut Source, code: &mut Code) -> Result<(), String> {
+    parse_term(s, code)?;
     loop {
         if token_match(s, b"+") {
-            v += parse_term(s)?;
+            parse_term(s, code)?;
+            code.push(Insn::Add);
         } else if token_match(s, b"-") {
-            v -= parse_term(s)?;
+            parse_term(s, code)?;
+            code.push(Insn::Sub);
         } else {
             break;
         }
     }
-    Ok(v)
+    Ok(())
 }
 
-fn parse_term(s: &mut Source) -> Result<Compiled, String> {
-    let mut v = parse_factor(s)?;
+fn parse_term(s: &mut Source, code: &mut Code) -> Result<(), String> {
+    parse_factor(s, code)?;
     while token_match(s, b"*") {
-        v *= parse_factor(s)?;
+        parse_factor(s, code)?;
+        code.push(Insn::Mul);
     }
-    Ok(v)
+    Ok(())
 }
 
-fn parse_factor(s: &mut Source) -> Result<Compiled, String> {
+fn parse_factor(s: &mut Source, code: &mut Code) -> Result<(), String> {
     let begin = &<&[u8]>::clone(s);
     if token_match(s, b"(") {
-        let r = parse_expr(s)?;
+        parse_expr(s, code)?;
         if token_match(s, b")") {
-            Ok(r)
+            Ok(())
         } else {
             Err(format!(
                 "{} lack closing parens",
@@ -239,13 +244,15 @@ fn parse_factor(s: &mut Source) -> Result<Compiled, String> {
             ))
         }
     } else if token_match(s, b"-") {
-        Ok(-parse_factor(s)?)
+        parse_factor(s, code)?;
+        code.push(Insn::Negate);
+        Ok(())
     } else {
-        parse_uint(s)
+        parse_uint(s, code)
     }
 }
 
-fn parse_uint(s: &mut Source) -> Result<Compiled, String> {
+fn parse_uint(s: &mut Source, code: &mut Code) -> Result<(), String> {
     if b'0' <= s[0] && s[0] <= b'9' {
         let mut v = 0;
         while !s.is_empty() && b'0' <= s[0] && s[0] <= b'9' {
@@ -253,7 +260,8 @@ fn parse_uint(s: &mut Source) -> Result<Compiled, String> {
             *s = &s[1..];
         }
         skip_whitespace(s);
-        Ok(v)
+        code.push(Insn::Const(v));
+        Ok(())
     } else {
         Err(format!(
             "Expected uint, not {}",
