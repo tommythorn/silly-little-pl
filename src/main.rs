@@ -3,12 +3,17 @@
 type Source<'a> = &'a [u8];
 type Compiled = isize;
 #[allow(dead_code)]
-enum Insn {
+pub enum Insn {
+    Const(isize),
+    Dup,
     Add,
     Sub,
     Mul,
     Negate,
-    Const(isize),
+    Print,
+    Block(Vec<Insn>),
+    RestartBlock(usize),
+    ExitBlock(usize),
 }
 
 #[test]
@@ -56,28 +61,122 @@ fn run(s: Source) -> Result<Compiled, String> {
 }
 
 #[allow(dead_code)]
-fn execute(code: Vec<Insn>) -> Result<isize, String> {
-    let mut stack = vec![];
-    let mut tos = 0;
-    for insn in code {
-        match insn {
-            Insn::Add => tos += stack.pop().ok_or("Run: stack empty")?,
-            Insn::Sub => tos -= stack.pop().ok_or("Run: stack empty")?,
-            Insn::Mul => tos *= stack.pop().ok_or("Run: stack empty")?,
-            Insn::Negate => tos = -tos,
-            Insn::Const(k) => {
-                stack.push(tos);
-                tos = k;
-            }
+pub struct VM {
+    stack: Vec<isize>,
+    tos: isize,
+}
+
+#[derive(PartialEq, Eq, Debug)]
+pub enum Continuation {
+    Done,
+    Exit(usize),
+    Restart(usize),
+}
+
+impl Default for VM {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl VM {
+    pub fn new() -> Self {
+        VM {
+            stack: vec![],
+            tos: 0,
         }
     }
-    Ok(tos)
+
+    fn pop(&mut self) -> Result<isize, String> {
+        let res = self.tos;
+        self.tos = self.stack.pop().ok_or("Run: stack empty")?;
+        Ok(res)
+    }
+
+    pub fn execute(&mut self, code: &[Insn]) -> Result<Continuation, String> {
+        'from_beginning: loop {
+            for insn in code {
+                use Continuation::*;
+                use Insn::*;
+                match insn {
+                    Dup => self.stack.push(self.tos),
+                    Add => self.tos += self.stack.pop().ok_or("Run: stack empty")?,
+                    Sub => self.tos -= self.stack.pop().ok_or("Run: stack empty")?,
+                    Mul => self.tos *= self.stack.pop().ok_or("Run: stack empty")?,
+                    Negate => self.tos = -self.tos,
+                    Const(k) => {
+                        self.stack.push(self.tos);
+                        self.tos = *k;
+                    }
+                    Print => {
+                        println!("{}", self.pop()?);
+                    }
+                    Block(inner) => match self.execute(inner)? {
+                        Done => {}
+                        Restart(0) => continue 'from_beginning,
+                        Restart(n) => return Ok(Restart(n - 1)),
+                        Exit(0) => break,
+                        Exit(n) => return Ok(Exit(n - 1)),
+                    },
+                    RestartBlock(0) => {
+                        if self.pop()? != 0 {
+                            continue 'from_beginning;
+                        }
+                    }
+                    RestartBlock(n) => {
+                        if self.pop()? != 0 {
+                            return Ok(Restart(*n));
+                        }
+                    }
+                    ExitBlock(0) => {
+                        if self.pop()? != 0 {
+                            break;
+                        }
+                    }
+                    ExitBlock(n) => {
+                        if self.pop()? != 0 {
+                            return Ok(Exit(*n));
+                        }
+                    }
+                }
+            }
+            break;
+        }
+        Ok(Continuation::Done)
+    }
 }
 
 #[test]
 fn execute_test() {
     use Insn::*;
-    assert_eq!(execute(vec![Const(42), Const(42), Add]), Ok(84));
+    let mut vm = VM::new();
+    assert_eq!(
+        vm.execute(&vec![Block(vec![
+            Const(42),
+            Const(42),
+            Add,
+            Print,
+            Const(84),
+            Const(1),
+            ExitBlock(0),
+            Const(666),
+            Print,
+            Const(666),
+        ])]),
+        Ok(Continuation::Done)
+    );
+    assert_eq!(vm.tos, 84);
+}
+
+#[test]
+fn execute_nested() {
+    use Insn::*;
+    let mut vm = VM::new();
+    let blk2 = Block(vec![Const(42), Const(1), ExitBlock(1)]);
+    let blk1 = Block(vec![blk2, Const(666)]);
+
+    assert_eq!(vm.execute(&vec![blk1]), Ok(Continuation::Done));
+    assert_eq!(vm.tos, 42);
 }
 
 fn parse(mut s: Source) -> Result<Compiled, String> {
